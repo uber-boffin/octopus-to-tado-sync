@@ -108,9 +108,23 @@ def send_reading_to_tado(username, password, reading):
     # Get current readings from Tado to check if we should submit
     try:
         current_readings = tado.get_eiq_meter_readings()
+        print(f"Raw Tado readings response: {current_readings}")
+
         if current_readings and len(current_readings) > 0:
-            # Get the most recent reading
-            latest_reading = max(r.get('reading', 0) for r in current_readings)
+            # Handle different response formats
+            latest_reading = 0
+            for r in current_readings:
+                if isinstance(r, dict):
+                    reading_val = r.get('reading', 0)
+                elif isinstance(r, (int, float)):
+                    reading_val = r
+                elif isinstance(r, str):
+                    reading_val = int(r)
+                else:
+                    reading_val = 0
+                if reading_val > latest_reading:
+                    latest_reading = reading_val
+
             print(f"Current latest reading in Tado: {latest_reading}")
 
             if new_reading <= latest_reading:
