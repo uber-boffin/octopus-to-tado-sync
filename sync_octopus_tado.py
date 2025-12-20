@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import math
 import requests
 from datetime import datetime
 from requests.auth import HTTPBasicAuth
@@ -95,12 +96,34 @@ def tado_login(username, password):
 def send_reading_to_tado(username, password, reading):
     """
     Sends the total consumption reading to Tado using its Energy IQ feature.
+    Only submits if the new reading is higher than the current one.
     """
 
     tado = tado_login(username=username, password=password)
 
-    result = tado.set_eiq_meter_readings(reading=int(reading))
-    print(result)
+    # Round up to ensure we always have a higher reading when consumption increases
+    new_reading = math.ceil(reading)
+    print(f"New reading to submit (rounded up): {new_reading}")
+
+    # Get current readings from Tado to check if we should submit
+    try:
+        current_readings = tado.get_eiq_meter_readings()
+        if current_readings and len(current_readings) > 0:
+            # Get the most recent reading
+            latest_reading = max(r.get('reading', 0) for r in current_readings)
+            print(f"Current latest reading in Tado: {latest_reading}")
+
+            if new_reading <= latest_reading:
+                print(f"Skipping submission: new reading ({new_reading}) is not higher than current ({latest_reading})")
+                return
+        else:
+            print("No existing readings found in Tado, proceeding with submission")
+    except Exception as e:
+        print(f"Could not retrieve current readings: {e}")
+        print("Proceeding with submission anyway")
+
+    result = tado.set_eiq_meter_readings(reading=new_reading)
+    print(f"Tado response: {result}")
 
 
 def parse_args():
