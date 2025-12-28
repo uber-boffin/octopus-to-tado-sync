@@ -1,16 +1,4 @@
-iiod_from = datetime(2000, 1, 1, 0, 0, 0)
-    url = f"https://api.octopus.energy/v1/gas-meter-points/{mprn}/meters/{gas_serial_number}/consumption/?group_by=quarter&period_from={period_from.isoformat()}Z"
-    total_consumption = 0.0
-
-    while url:
-        response = requests.get(url, auth=HTTPBasicAuth(api_key, ""))
-
-        if response.status_code == 200:
-            meter_readings = response.json()
-            total_consumption += sum(
-                interval["consumption"] for interval in meter_readings["results"]
-            )
-            url = metermport argparse
+import argparse
 import asyncio
 import requests
 from datetime import datetime
@@ -23,7 +11,19 @@ def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number):
     """
     Retrieves total gas consumption from the Octopus Energy API for the given gas meter point and serial number.
     """
-    per_readings.get("next", "")
+    period_from = datetime(2000, 1, 1, 0, 0, 0)
+    url = f"https://api.octopus.energy/v1/gas-meter-points/{mprn}/meters/{gas_serial_number}/consumption/?group_by=quarter&period_from={period_from.isoformat()}Z"
+    total_consumption = 0.0
+
+    while url:
+        response = requests.get(url, auth=HTTPBasicAuth(api_key, ""))
+
+        if response.status_code == 200:
+            meter_readings = response.json()
+            total_consumption += sum(
+                interval["consumption"] for interval in meter_readings["results"]
+            )
+            url = meter_readings.get("next", "")
         else:
             print(
                 f"Failed to retrieve data. Status code: {response.status_code}, Message: {response.text}"
