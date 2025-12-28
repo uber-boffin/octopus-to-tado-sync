@@ -1,18 +1,4 @@
-import argparse
-import asyncio
-import math
-import requests
-from datetime import datetime
-from requests.auth import HTTPBasicAuth
-from playwright.async_api import async_playwright
-from PyTado.interface import Tado
-
-
-def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number):
-    """
-    Retrieves total gas consumption from the Octopus Energy API for the given gas meter point and serial number.
-    """
-    period_from = datetime(2000, 1, 1, 0, 0, 0)
+iiod_from = datetime(2000, 1, 1, 0, 0, 0)
     url = f"https://api.octopus.energy/v1/gas-meter-points/{mprn}/meters/{gas_serial_number}/consumption/?group_by=quarter&period_from={period_from.isoformat()}Z"
     total_consumption = 0.0
 
@@ -24,7 +10,20 @@ def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number):
             total_consumption += sum(
                 interval["consumption"] for interval in meter_readings["results"]
             )
-            url = meter_readings.get("next", "")
+            url = metermport argparse
+import asyncio
+import requests
+from datetime import datetime
+from requests.auth import HTTPBasicAuth
+from playwright.async_api import async_playwright
+from PyTado.interface import Tado
+
+
+def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number):
+    """
+    Retrieves total gas consumption from the Octopus Energy API for the given gas meter point and serial number.
+    """
+    per_readings.get("next", "")
         else:
             print(
                 f"Failed to retrieve data. Status code: {response.status_code}, Message: {response.text}"
@@ -101,9 +100,9 @@ def send_reading_to_tado(username, password, reading):
 
     tado = tado_login(username=username, password=password)
 
-    # Round up to ensure we always have a higher reading when consumption increases
-    new_reading = math.ceil(reading)
-    print(f"New reading to submit (rounded up): {new_reading}")
+    # Round to nearest integer for more accurate readings
+    new_reading = round(reading)
+    print(f"New reading to submit (rounded): {new_reading}")
 
     # Get current readings from Tado to check if we should submit
     try:
