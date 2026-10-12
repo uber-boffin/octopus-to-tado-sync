@@ -42,6 +42,16 @@ Tado account and Octopus Energy API. This is done through GitHub secrets.
 | `OCTOPUS_GAS_SERIAL`     | The serial number of your gas meter.                          |
 | `OCTOPUS_API_KEY`        | Your Octopus Energy API key. You can obtain this from the Octopus Energy developer portal (details below). |
 
+**How the reading is calculated:** Tado needs the number on your meter's
+register, but Octopus's consumption API only gives usage per half-hour, and only
+since your smart meter began reporting. Adding that usage up gives a total far
+below your real meter, which Tado rejects. The script instead takes the latest
+register reading Octopus collected from the meter itself (roughly monthly, via
+Octopus's GraphQL API with the same API key) and adds the half-hourly usage
+since. It corrects itself each month. If Octopus ever stops collecting register
+readings, pass `--anchor-reading` and `--anchor-date` with a reading from the
+physical meter.
+
 ### 3. Obtain Your Octopus Energy Details
 
 To find your **API Key**, **Gas MPRN**, and **Gas Serial Number**, follow these
