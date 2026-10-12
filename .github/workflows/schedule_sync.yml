@@ -9,6 +9,9 @@ on:
 jobs:
   run_script:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write  # for the keep-alive step
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
@@ -35,3 +38,11 @@ jobs:
           --mprn "${{ secrets.OCTOPUS_MPRN }}" \
           --gas-serial-number "${{ secrets.OCTOPUS_GAS_SERIAL }}" \
           --octopus-api-key "${{ secrets.OCTOPUS_API_KEY }}"
+
+    # GitHub disables scheduled workflows after 60 days without a commit.
+    # Re-enabling the workflow via the API resets that timer, without commits.
+    - name: Keep schedule alive
+      if: always()
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/schedule_sync.yml/enable"

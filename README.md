@@ -52,6 +52,17 @@ since. It corrects itself each month. If Octopus ever stops collecting register
 readings, pass `--anchor-reading` and `--anchor-date` with a reading from the
 physical meter.
 
+**Tariff:** each run also keeps Tado's Energy IQ tariff in line with your
+current Octopus gas unit rate (inc VAT, per kWh). When the rate changes, the old
+tariff is closed the day before and a new one starts. Direct Debit rates are
+used by default; pass `--payment-method NON_DIRECT_DEBIT` if you pay otherwise,
+or `--no-tariff-sync` to leave Tado's tariff alone. Tado's tariff has no
+standing charge, so Energy IQ costs cover unit charges only.
+
+**Keep-alive:** GitHub disables scheduled workflows after 60 days without a
+commit. The workflow's last step re-enables itself through the API to stop that
+happening.
+
 ### 3. Obtain Your Octopus Energy Details
 
 To find your **API Key**, **Gas MPRN**, and **Gas Serial Number**, follow these

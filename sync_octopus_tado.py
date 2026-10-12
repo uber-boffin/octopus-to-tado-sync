@@ -2,14 +2,17 @@ import argparse
 import asyncio
 import sys
 from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 from requests.auth import HTTPBasicAuth
 from playwright.async_api import async_playwright
+from PyTado.http import Action, Endpoint, TadoRequest
 from PyTado.interface import Tado
 
 OCTOPUS_API = "https://api.octopus.energy/v1"
 OCTOPUS_GRAPHQL = f"{OCTOPUS_API}/graphql/"
+UK = ZoneInfo("Europe/London")
 
 # How far (in meter units) a calculated reading may fall below Tado's latest
 # before it is treated as an error rather than normal re-anchoring noise
@@ -51,6 +54,73 @@ def octopus_graphql(query, variables=None, token=None):
     return body["data"]
 
 
+def get_kraken_token(api_key):
+    return octopus_graphql(
+        "mutation($key: String!) { obtainKrakenToken(input: {APIKey: $key}) { token } }",
+        {"key": api_key},
+    )["obtainKrakenToken"]["token"]
+
+
+def get_current_gas_unit_rate(api_key, mprn, payment_method):
+    """
+    Returns (pence_per_kwh_inc_vat, start_date) for the gas tariff currently in
+    force on this meter point. start_date is the UK date the rate (or the
+    agreement, if later) began.
+    """
+    account_number = octopus_graphql(
+        "{ viewer { accounts { number } } }", token=get_kraken_token(api_key)
+    )["viewer"]["accounts"][0]["number"]
+    account = octopus_get(f"{OCTOPUS_API}/accounts/{account_number}/", api_key)
+
+    now = datetime.now(timezone.utc)
+
+    def in_force(item):
+        starts = datetime.fromisoformat(item["valid_from"])
+        ends = item["valid_to"] and datetime.fromisoformat(item["valid_to"])
+        return starts <= now and (not ends or now < ends)
+
+    agreements = [
+        agreement
+        for prop in account["properties"]
+        for point in prop["gas_meter_points"]
+        if point["mprn"] == mprn
+        for agreement in point["agreements"]
+    ]
+    agreement = next((a for a in agreements if in_force(a)), None)
+    if not agreement:
+        fail(f"No gas tariff agreement in force for MPRN {mprn}")
+
+    # e.g. G-1R-VAR-22-11-01-G -> product VAR-22-11-01
+    tariff_code = agreement["tariff_code"]
+    product_code = "-".join(tariff_code.split("-")[2:-1])
+    rates = octopus_get(
+        f"{OCTOPUS_API}/products/{product_code}/gas-tariffs/{tariff_code}/standard-unit-rates/",
+        api_key,
+        {"period_from": (now - timedelta(days=1)).isoformat()},
+    )["results"]
+    # Fixed tariffs have one rate for all payment methods (payment_method is null)
+    rate = next(
+        (
+            r
+            for r in rates
+            if in_force(r) and r.get("payment_method") in (payment_method, None)
+        ),
+        None,
+    )
+    if not rate:
+        fail(f"No {payment_method} unit rate in force for tariff {tariff_code}")
+
+    starts = max(
+        datetime.fromisoformat(rate["valid_from"]),
+        datetime.fromisoformat(agreement["valid_from"]),
+    )
+    start_date = starts.astimezone(UK).date()
+    print(
+        f"Octopus gas tariff {tariff_code}: {rate['value_inc_vat']:.3f}p/kWh since {start_date}"
+    )
+    return rate["value_inc_vat"], start_date
+
+
 def get_register_readings(api_key, mprn, gas_serial_number, count=5):
     """
     Returns the most recent real register readings for the gas meter (newest first)
@@ -60,10 +130,7 @@ def get_register_readings(api_key, mprn, gas_serial_number, count=5):
     The REST API only exposes consumption, so this uses Octopus's GraphQL API,
     which accepts the same API key.
     """
-    token = octopus_graphql(
-        "mutation($key: String!) { obtainKrakenToken(input: {APIKey: $key}) { token } }",
-        {"key": api_key},
-    )["obtainKrakenToken"]["token"]
+    token = get_kraken_token(api_key)
 
     data = octopus_graphql(
         """
@@ -150,7 +217,7 @@ def calculate_meter_reading(
     from the physical meter) can be given instead, treated as taken at the end of
     anchor_date.
 
-    Returns (reading_date, reading).
+    Returns (reading_date, reading), or (None, None) if there is no data yet.
     """
     if anchor_reading is not None:
         anchor_at = datetime.combine(
@@ -170,8 +237,8 @@ def calculate_meter_reading(
     print(f"Octopus consumption data available until: {data_until}")
 
     if data_until <= anchor_at:
-        print("No consumption data after the anchor yet; nothing to submit")
-        sys.exit(0)
+        print("No consumption data after the anchor yet; no reading to submit")
+        return None, None
 
     usage_since_anchor = get_consumption_between(
         api_key, mprn, gas_serial_number, anchor_at, data_until
@@ -222,6 +289,67 @@ async def browser_login(url, username, password):
         await browser.close()
 
 
+def tado_delete(tado, command):
+    """
+    PyTado has no delete methods for Energy IQ, so send the request directly.
+    """
+    request = TadoRequest()
+    request.command = command
+    request.action = Action.RESET  # HTTP DELETE
+    request.endpoint = Endpoint.EIQ
+    return tado._http.request(request)
+
+
+def set_tado_tariff(tado, pence, start, end=None):
+    # PyTado multiplies by 100 to get Tado's "cents" (pence here), so pass pounds
+    result = tado.set_eiq_tariff(
+        from_date=start.isoformat(),
+        to_date=(end or start).isoformat(),
+        tariff=round(pence / 100, 5),
+        unit="kWh",
+        is_period=end is not None,
+    )
+    if not isinstance(result, dict) or "id" not in result:
+        fail(f"Tado rejected the tariff: {result}")
+    return result
+
+
+def sync_tariff_to_tado(tado, pence, start_date):
+    """
+    Makes Tado's latest Energy IQ tariff match the current Octopus unit rate.
+    When the rate has changed, the open-ended tariff is closed the day before
+    the new rate starts and a new open-ended tariff is added from that day.
+    """
+    tariffs = tado.get_eiq_tariffs().get("tariffs", [])
+    latest = max(tariffs, key=lambda t: t["startDate"], default=None)
+
+    if latest and round(latest["tariffInCents"], 3) == round(pence, 3):
+        print(f"Tariff in Tado is current: {latest['tariffInCents']}p/kWh")
+        return
+
+    if latest and latest["startDate"] >= start_date.isoformat():
+        fail(
+            f"Tado's latest tariff ({latest['tariffInCents']}p from {latest['startDate']}) conflicts"
+            f" with Octopus's {pence:.3f}p from {start_date}; correct it in the Tado app"
+        )
+
+    if latest and "endDate" not in latest:
+        # Tado has no update endpoint, so replace the open tariff with a closed one
+        tado_delete(tado, f"tariffs/{latest['id']}")
+        set_tado_tariff(
+            tado,
+            latest["tariffInCents"],
+            date.fromisoformat(latest["startDate"]),
+            start_date - timedelta(days=1),
+        )
+        print(
+            f"Closed tariff {latest['tariffInCents']}p/kWh from {latest['startDate']} on {start_date - timedelta(days=1)}"
+        )
+
+    set_tado_tariff(tado, pence, start_date)
+    print(f"Added tariff {round(pence, 3)}p/kWh from {start_date}")
+
+
 def tado_login(username, password):
     tado = Tado(token_file_path="/tmp/tado_refresh_token")
 
@@ -261,14 +389,12 @@ def get_latest_tado_reading(tado):
     return max(readings_list, key=lambda r: r.get("date", ""))
 
 
-def send_reading_to_tado(username, password, reading_date, reading):
+def send_reading_to_tado(tado, reading_date, reading):
     """
     Sends the meter reading to Tado using its Energy IQ feature.
     Tado rejects readings lower than ones it already holds, so only submits
     if the new reading is higher than the latest one.
     """
-
-    tado = tado_login(username=username, password=password)
 
     # Tado only accepts whole numbers. Round down so we never get ahead of the
     # real meter, which would block the next genuine reading.
@@ -348,9 +474,20 @@ def parse_args():
         help="Date the anchor reading was taken (YYYY-MM-DD), treated as end of day",
     )
     parser.add_argument(
+        "--payment-method",
+        choices=["DIRECT_DEBIT", "NON_DIRECT_DEBIT"],
+        default="DIRECT_DEBIT",
+        help="Which Octopus unit rate applies (default DIRECT_DEBIT)",
+    )
+    parser.add_argument(
+        "--no-tariff-sync",
+        action="store_true",
+        help="Do not keep Tado's Energy IQ tariff in line with Octopus",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Calculate the reading but do not log in to or submit to Tado",
+        help="Calculate the reading and tariff but do not log in to or submit to Tado",
     )
 
     args = parser.parse_args()
@@ -370,7 +507,17 @@ if __name__ == "__main__":
         args.anchor_date,
     )
 
+    unit_rate = None
+    if not args.no_tariff_sync:
+        unit_rate = get_current_gas_unit_rate(
+            args.octopus_api_key, args.mprn, args.payment_method
+        )
+
     if args.dry_run:
         print("Dry run: not submitting to Tado")
     else:
-        send_reading_to_tado(args.tado_email, args.tado_password, reading_date, reading)
+        tado = tado_login(username=args.tado_email, password=args.tado_password)
+        if reading is not None:
+            send_reading_to_tado(tado, reading_date, reading)
+        if unit_rate:
+            sync_tariff_to_tado(tado, *unit_rate)
